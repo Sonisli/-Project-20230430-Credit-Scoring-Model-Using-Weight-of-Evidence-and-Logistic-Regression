@@ -1,0 +1,986 @@
+---
+title: "Credit Scoring Model Using Weight of Evidence and Logistic Regression"
+author: "Siheng Huang, Yunhao Li, Yicong Li"
+date: "April 28, 2023"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+<br>
+
+```{r setup, include=FALSE}
+# Having knitr::opts_chunk$set(echo = TRUE) in a chunk at the beginning of your document is the same of having ````{r echo = TRUE}` for all chunks.
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning = FALSE, message=FALSE}
+#install.packages("dplyr")
+#install.packages("mice")
+#install.packages("visdat")
+```
+
+<br>
+
+## 1. Preparation of the problem
+
+### Objective
+
+To create a credit scorecard that improves the effectiveness of credit scoring by predicting the likelihood of an individual experiencing financial crisis within the next two years, and thereby helps lenders make better decisions.
+
+<br>
+
+### Background
+
+- Banks play a crucial role in a market economy. They decide who can receive financing under what conditions, and can create or break investment decisions. Meanwhile, markets, society, as well as individuals and businesses, all require access to loans.
+
+- Credit scoring algorithms guess the likelihood of default, which is the method that banks use to determine whether a loan should be granted or not.
+
+<br>
+
+### Preparation
+
+- Firstly, in the context of individual borrowing, define the term "default": according to the new Basel II Capital Accord, generally, a default is considered when the payment is overdue for more than 90 days.
+
+- For the discriminant indicator, choose to use the maximum number of days in default history.
+
+<br>
+
+## 2. Data Acquisition and Integration
+
+### Data source
+
+The data comes from Kaggle, and the cs-training.csv contains 150,000 sample data. The following figure shows the approximate situation of this data. The download address is: https://www.kaggle.com/c/GiveMeSomeCredit/data
+
+<br>
+
+### Data description
+
+The data belongs to personal consumer loans. Only data that can be used in credit scoring implementation should be obtained from the following aspects:
+
+- Basic attributes: including the borrower's age at the time.
+
+- Debt repayment ability: including the borrower's monthly income and debt ratio.
+
+- Credit history: number of times 35-59 days overdue in the last two years, number of times 60-89 days overdue in the last two years, and number of times overdue for 90 days or more in the last two years.
+
+- Property status: including the number of open credit and loan accounts, and the number of real estate loans or credit lines.
+
+- Loan attributes: None for now.
+
+- Other factors: including the number of the borrower's dependents (excluding the borrower)
+
+<br>
+
+#### Time window
+
+The observation window for independent variables is the past two years, and the performance window for dependent variables is the next two years.
+
+<br>
+
+#### Data
+
+|Variable Name|Description|Type|
+|---|---|---|
+|SeriousDlqin2yrs|Person experienced 90 days past due delinquency or worse|Y/N|
+|RevolvingUtilizationOfUnsecuredLines|Total balance on credit cards and personal lines of credit except real estate and no installment deb...|percentage|
+|age|Age of borrower in years|integer|
+|NumberOfTime30-59DaysPastDueNotWorse|Number of times borrower has been 30-59 days past due but no worse in the last 2 years.|integer|
+|DebtRatio|Monthly debt payments, alimony,living costs divided by monthy gross income|percentage|
+|MonthlyIncome|Monthly income|real|
+|NumberOfOpenCreditLinesAndLoans|Number of Open loans (installment like car loan or mortgage) and Lines of credit (e.g. credit cards)|integer|
+|NumberOfTimes90DaysLate|Number of times borrower has been 90 days or more past due.|integer|
+|NumberRealEstateLoansOrLines|Number of mortgage and real estate loans including home equity lines of credit|integer|
+|NumberOfTime60-89DaysPastDueNotWorse|Number of times borrower has been 60-89 days past due but no worse in the last 2 years.|integer|
+|NumberOfDependents|Number of dependents in family excluding themselves (spouse, children etc.)|integer|
+
+
+```{r}
+# loading the data
+data <- read.csv("./cs-training.csv",row.names = 1)
+```
+
+```{r}
+head(data)
+```
+
+<br>
+
+```{r}
+# split training data and testing data
+set.seed(123) 
+
+index <- sample(1:nrow(data), size = floor(0.7*nrow(data)), replace = FALSE) 
+train <- data[index, ] 
+test <- data[-index, ] 
+```
+
+```{r}
+cat(nrow(train), nrow(test))
+```
+
+<br>
+
+## 3. Data Processing
+
+First, remove the ordinal variable in the original data, which is the id variable in the first column. Since the variable to be predicted is the SeriousDlqin2yrs variable, set it as the response variable y, and set others as x1~x10 variables.
+
+### 3.1 Missing value analysis and processing
+
+After obtaining the data set, we need to observe the distribution of the data, because many models are sensitive to missing values. Therefore, observing whether there are missing values is an important step. Before the formal analysis, we use graphs to obtain an intuitive understanding of the missing status of the observed fields.
+
+```{r, warning = FALSE, message=FALSE}
+library(dplyr)
+library(visdat)
+train_sampled <- train %>% slice_sample(n = 1000, replace = FALSE)
+vis_miss(train_sampled)
+```
+
+<br>
+
+```{r, warning = FALSE, message=FALSE}
+library(mice)
+plot.window(xlim=c(-1, 30), ylim=c(-1, 20), asp=1)
+md.pattern(train, rotate.names=TRUE)
+```
+
+<br>
+
+The matrixplot function is used to visualize the missing values, where light colors indicate small values and dark colors indicate large values, while missing values are shown in red by default. In the figure above, x5 and x10 variables, i.e., MonthlyIncome and NumberOfDependents, have missing values. The specific missing value situation can be seen in the table above, where the monthlyincome column has 29731 missing values and the numberofdependents column has 3924 missing values.
+
+The simplest method to deal with missing data is to remove them directly, but in this article, since the proportion of missing values is high, directly removing them would result in a large loss of observations, which is not the most suitable method. **Here, we use the regression method to fill in the missing values.**
+
+<br>
+
+#### using regression method to fill with missing data
+
+```{r}
+library(mice)
+
+# univariate imputation method: pmm - any- Predictive mean matching
+train_filled <- mice(train, method = "pmm", m = 5, seed = 123)
+```
+
+<br>
+
+```{r}
+train <- complete(train_filled)
+
+# the filling result
+md.pattern(train, rotate.names=TRUE)
+```
+```{r}
+?md.pattern()
+```
+
+<br>
+
+###  3.2 Outlier Analysis and Treatment
+
+For the age variable, which is the age of the customer, we can perform quantitative analysis and find the following values:
+
+```{r}
+unique(train$age)
+```
+
+<br>
+
+As we can see, there are values of 0 in the age variable, which are obviously outliers and should be removed.
+
+```{r}
+train <- train[-which(train$age==0),]
+```
+
+<br>
+
+## 4. variable analysis
+
+### 4.1 Univariate analysis
+
+```{r, warning = FALSE, message=FALSE}
+# Load required libraries
+library(ggplot2)
+library(gridExtra)
+
+# First plot for age
+plot1 <- ggplot(train, aes(x = age, y = ..density..)) + 
+  geom_histogram(fill = "blue", colour = "grey60", size = 0.2, alpha = 0.2) + 
+  geom_density() +
+  ggtitle("Age Distribution")
+
+# Second plot for MonthlyIncome
+plot2 <- ggplot(train, aes(x = MonthlyIncome, y = ..density..)) + 
+  geom_histogram(fill = "blue", colour = "grey60", size = 0.2, alpha = 0.2) + 
+  geom_density() + 
+  xlim(1, 20000) +
+  ggtitle("Monthly Income Distribution")
+
+# Combine the plots
+combined_plot <- grid.arrange(plot1, plot2, nrow = 1)
+```
+
+This plot suggests that the age variable in the dataset appears to follow a normal distribution, which is a common assumption in statistical analysis. The monthly income variable in the dataset also appears to follow a normal distribution, which is desirable for statistical analysis.
+
+
+<br>
+
+### 4.2 Correlation between variables
+
+```{r, warning = FALSE, message=FALSE}
+library(corrplot)
+
+cor1 <- cor(train[,1:11])
+corrplot(cor1, tl.cex = 0.8, is.corr = 0.8)
+```
+
+<br>
+
+```{r, warning = FALSE, message=FALSE}
+
+corrplot(cor1, method = "number", tl.cex = 0.8, number.cex = 0.4)
+
+```
+
+From the above plot, we can see that the correlation between variables is very small. Logistic regression also needs to check for multicollinearity issues, but in this case, since the correlation between variables is small, it can be preliminarily concluded that there is no multicollinearity problem. Of course, after modeling, we can still use the VIF (variance inflation factor) to check for multicollinearity problems. If multicollinearity exists, that is, two variables may be highly correlated, dimensionality reduction or removal may be required.
+
+<br>
+
+## 5. Logistics Regression
+
+Logistic regression plays a core role in credit scoring card development. Due to its characteristics and the evidence weight conversion (WOE) applied to independent variables, the results of logistic regression can be directly converted into a summary table, which is called the standard scoring card format.
+
+### 5.1 fitting model
+
+```{r, warning = FALSE, message=FALSE}
+fit <- glm(SeriousDlqin2yrs~., train, family = "binomial")
+summary(fit)
+```
+
+It can be seen that using all variables for regression does not achieve a good model fitting effect. Two variables, **NumberOfOpenCreditLinesAndLoans** and **RevolvingUtilizationOfUnsecuredLines**, failed to pass the p-value test.
+
+<br>
+
+#### Remove NumberOfOpenCreditLinesAndLoans and RevolvingUtilizationOfUnsecuredLines to apply model again
+
+```{r, warning = FALSE, message=FALSE}
+fit2<-glm(SeriousDlqin2yrs ~ age+NumberOfTime30.59DaysPastDueNotWorse+DebtRatio+MonthlyIncome+NumberOfTimes90DaysLate
+          +NumberRealEstateLoansOrLines+NumberOfTime60.89DaysPastDueNotWorse+NumberOfDependents, train, family = "binomial")
+summary(fit2)
+```
+
+All variables in the second regression model passed the test, and even the AIC value (Akaike information criterion) was smaller, indicating that the fit of all models was better.
+
+<br>
+
+### 5.2 Model Evaluation
+
+#### use the model to make predictions on the test data and generate probability predictions
+
+```{r}
+pre <- predict(fit2,test)
+```
+
+#### ROC
+
+```{r, warning = FALSE, message=FALSE}
+library(pROC)
+modelroc <- roc(test$SeriousDlqin2yrs,pre)
+plot(modelroc, print.auc=TRUE, auc.polygon=TRUE, grid=c(0.1, 0.2),
+     grid.col=c("green", "red"), max.auc.polygon=TRUE,
+     auc.polygon.col="skyblue", print.thres=TRUE)
+```
+
+The optimal point in the above figure has an
+
+- FPR of 1-TNR = 0.836
+- TPR of 0.469
+- AUC value of 0.692
+
+This indicates that the predictive performance of the model is quite good, with a high level of accuracy.
+
+<br>
+
+## 6. Weight of Evidence (WOE)
+
+WOE can be used to transform the logistic regression model into a standard credit scorecard format.
+
+The purpose of WOE transformation is not to improve the quality of the model, but because some variables should not be included in the model. This may be because they cannot increase the model value or because there is a large error associated with the coefficient of the model. In fact, a standard credit scorecard can also be established without using WOE transformation. In this case, the logistic regression model needs to deal with a larger number of independent variables. Although this increases the complexity of the modeling program, the final scorecards are the same.
+
+Variable x can be replaced with WOE(x):
+
+$$WOE = \log(\frac{defaults\%}{non\text{−}defaults\%})$$
+
+After the above logistic regression, two variables NumberOfOpenCreditLinesAndLoans and RevolvingUtilizationOfUnsecuredLines are removed, and the remaining variables are transformed into WOE.
+
+<br>
+
+### 6.1 binning
+
+```{r}
+# Set the layout to 3 rows and 3 columns
+par(mfrow = c(3, 3))
+
+##### - age
+cut_age <- c(-Inf,30,35,40,45,50,55,60,65,75,Inf)
+plot(cut(train$age,cut_age), main = "Age Binning")
+
+##### - NumberOfTime30.59DaysPastDueNotWorse
+cut_2 <- c(-Inf,0,1,3,5,Inf)
+plot(cut(train$NumberOfTime30.59DaysPastDueNotWorse,cut_2), main = "30-59 Days Past Due Binning")
+
+##### - DebtRatio
+cut_3 <- c(-Inf,0,0.5,1,Inf)
+plot(cut(train$DebtRatio,cut_3), main = "Debt Ratio Binning")
+
+##### - MonthlyIncome
+cut_4 <- c(-Inf,1000,2000,3000,4000,5000,6000,7500,9500,12000,Inf)
+plot(cut(train$MonthlyIncome,cut_4), main = "Monthly Income Binning")
+
+##### - NumberOfTimes90DaysLate
+cut_5 <- c(-Inf,0,1,3,5,10,Inf)
+plot(cut(train$NumberOfTimes90DaysLate,cut_5), main = "90 Days Late Binning")
+
+##### - NumberRealEstateLoansOrLines
+cut_6 <- c(-Inf,0,1,2,Inf)
+plot(cut(train$NumberRealEstateLoansOrLines,cut_6), main = "Real Estate Loans Binning")
+
+##### - NumberOfTime60.89DaysPastDueNotWorse
+cut_7 <- c(-Inf,0,1,Inf)
+plot(cut(train$NumberOfTime60.89DaysPastDueNotWorse,cut_7), main = "60-89 Days Past Due Binning")
+
+##### - NumberOfDependents
+cut_8 <- c(-Inf,0,1,2,3,5,Inf)
+plot(cut(train$NumberOfDependents,cut_8), main = "Number of Dependents Binning")
+
+# Reset the layout to default
+par(mfrow = c(1, 1))
+```
+
+<br>
+
+### 6.2 calculate the value of WOE
+
+```{r}
+# the function to calculate WOE
+totalgood <- as.numeric(table(train$SeriousDlqin2yrs))[1]
+totalbad <- as.numeric(table(train$SeriousDlqin2yrs))[2]
+
+getWOE <- function(a,p,q)
+{
+  Good <- as.numeric(table(train$SeriousDlqin2yrs[a > p & a <= q]))[1]
+  Bad <- as.numeric(table(train$SeriousDlqin2yrs[a > p & a <= q]))[2]
+  WOE <- log((Bad/totalbad)/(Good/totalgood),base = exp(1))
+  return(WOE)
+}
+```
+
+<br>
+
+##### - age
+
+```{r}
+Agelessthan30.WOE <- getWOE(train$age, -Inf, 30)
+Age30to35.WOE     <- getWOE(train$age, 30, 35)
+Age35to40.WOE     <- getWOE(train$age, 35, 40)
+Age40to45.WOE     <- getWOE(train$age, 40, 45)
+Age45to50.WOE     <- getWOE(train$age, 45, 50)
+Age50to55.WOE     <- getWOE(train$age, 50, 55)
+Age55to60.WOE     <- getWOE(train$age, 55, 60)
+Age60to65.WOE     <- getWOE(train$age, 60, 65)
+Age65to75.WOE     <- getWOE(train$age, 65, 75)
+Agemorethan.WOE   <- getWOE(train$age, 75, Inf)
+
+age.WOE <- c(Agelessthan30.WOE, Age30to35.WOE, Age35to40.WOE, Age40to45.WOE, Age45to50.WOE, Age50to55.WOE, Age55to60.WOE, Age60to65.WOE, Age65to75.WOE, Agemorethan.WOE)
+
+age.WOE
+```
+
+<br>
+
+##### - NumberOfTime30.59DaysPastDueNotWorse
+
+```{r}
+Num_30_59.WOE_1 <- getWOE(train$NumberOfTime30.59DaysPastDueNotWorse, -Inf, 0)
+Num_30_59.WOE_2 <- getWOE(train$NumberOfTime30.59DaysPastDueNotWorse, 0, 1)
+Num_30_59.WOE_3 <- getWOE(train$NumberOfTime30.59DaysPastDueNotWorse, 1, 3)
+Num_30_59.WOE_4 <- getWOE(train$NumberOfTime30.59DaysPastDueNotWorse, 3, 5)
+Num_30_59.WOE_5 <- getWOE(train$NumberOfTime30.59DaysPastDueNotWorse, 5, Inf)
+
+Num_30_59.WOE <- c(Num_30_59.WOE_1, Num_30_59.WOE_2, Num_30_59.WOE_3, Num_30_59.WOE_4, Num_30_59.WOE_5)
+
+Num_30_59.WOE
+```
+
+<br>
+
+##### - DebtRatio
+
+```{r}
+DebtRatio_1 <- getWOE(train$DebtRatio, -Inf, 0)
+DebtRatio_2 <- getWOE(train$DebtRatio, 0, 0.5)
+DebtRatio_3 <- getWOE(train$DebtRatio, 0.5, 1)
+DebtRatio_4 <- getWOE(train$DebtRatio, 1, Inf)
+
+DebtRatio.WOE <- c(DebtRatio_1, DebtRatio_2, DebtRatio_3, DebtRatio_4)
+
+DebtRatio.WOE
+```
+
+<br>
+
+##### - MonthlyIncome
+
+```{r}
+MonthlyIncome_1 <- getWOE(train$MonthlyIncome, -Inf, 1000)
+MonthlyIncome_2 <- getWOE(train$MonthlyIncome, 1000, 2000)
+MonthlyIncome_3 <- getWOE(train$MonthlyIncome, 2000, 3000)
+MonthlyIncome_4 <- getWOE(train$MonthlyIncome, 3000, 4000)
+MonthlyIncome_5 <- getWOE(train$MonthlyIncome, 4000, 5000)
+MonthlyIncome_6 <- getWOE(train$MonthlyIncome, 5000, 6000)
+MonthlyIncome_7 <- getWOE(train$MonthlyIncome, 6000, 7500)
+MonthlyIncome_8 <- getWOE(train$MonthlyIncome, 7500, 9500)
+MonthlyIncome_9 <- getWOE(train$MonthlyIncome, 9500, 12000)
+MonthlyIncome_10 <- getWOE(train$MonthlyIncome, 12000, Inf)
+
+MonthlyIncome.WOE <- c(MonthlyIncome_1, MonthlyIncome_2, MonthlyIncome_3, MonthlyIncome_4, MonthlyIncome_5, MonthlyIncome_6, MonthlyIncome_7, MonthlyIncome_8, MonthlyIncome_9, MonthlyIncome_10)
+
+MonthlyIncome.WOE
+```
+
+<br>
+
+##### - NumberOfTimes90DaysLate
+
+```{r}
+num_of_90_1 <- getWOE(train$NumberOfTimes90DaysLate, -Inf, 0)
+num_of_90_2 <- getWOE(train$NumberOfTimes90DaysLate, 0, 1)
+num_of_90_3 <- getWOE(train$NumberOfTimes90DaysLate, 1, 3)
+num_of_90_4 <- getWOE(train$NumberOfTimes90DaysLate, 3, 5)
+num_of_90_5 <- getWOE(train$NumberOfTimes90DaysLate, 5, 10)
+num_of_90_6 <- getWOE(train$NumberOfTimes90DaysLate, 10, Inf)
+
+
+num_of_90.WOE <- c(num_of_90_1, num_of_90_2, num_of_90_3, num_of_90_4, num_of_90_5, num_of_90_6)
+
+num_of_90.WOE
+```
+
+<br>
+
+##### - NumberRealEstateLoansOrLines
+
+```{r}
+num_RE_1 <- getWOE(train$NumberRealEstateLoansOrLines, -Inf, 0)
+num_RE_2 <- getWOE(train$NumberRealEstateLoansOrLines, 0, 1)
+num_RE_3 <- getWOE(train$NumberRealEstateLoansOrLines, 1, 2)
+num_RE_4 <- getWOE(train$NumberRealEstateLoansOrLines, 2, Inf)
+
+num_RE.WOE = c(num_RE_1, num_RE_2, num_RE_3, num_RE_4)
+
+num_RE.WOE
+```
+
+<br>
+
+##### - NumberOfTime60.89DaysPastDueNotWorse
+
+```{r}
+num_60_89_1 <- getWOE(train$NumberOfTime60.89DaysPastDueNotWorse, -Inf, 0)
+num_60_89_2 <- getWOE(train$NumberOfTime60.89DaysPastDueNotWorse, 0, 1)
+num_60_89_3 <- getWOE(train$NumberOfTime60.89DaysPastDueNotWorse, 1, Inf)
+
+num_60_89.WOE <- c(num_60_89_1, num_60_89_2, num_60_89_3)
+
+num_60_89.WOE
+```
+
+<br>
+
+##### - NumberOfDependents
+
+```{r}
+num_dep_1 <- getWOE(train$NumberOfDependents, -Inf, 0)
+num_dep_2 <- getWOE(train$NumberOfDependents, 0, 1)
+num_dep_3 <- getWOE(train$NumberOfDependents, 1, 2)
+num_dep_4 <- getWOE(train$NumberOfDependents, 2, 3)
+num_dep_5 <- getWOE(train$NumberOfDependents, 3, 5)
+num_dep_6 <- getWOE(train$NumberOfDependents, 5, Inf)
+
+num_dep.WOE <- c(num_dep_1, num_dep_2, num_dep_3, num_dep_4, num_dep_5, num_dep_6)
+
+num_dep.WOE
+```
+
+<br>
+
+### 6.3 Transforming variables using WOE
+
+```{r, warning = FALSE, message=FALSE}
+library(data.table)
+tmp <- copy(train)
+```
+
+<br>
+
+##### - age
+
+```{r}
+tmp.age <- 0
+
+for(i in 1:nrow(train)) {
+  if(train$age[i] <= 30)
+    tmp.age[i] <- age.WOE[1]
+    
+  else if(train$age[i] <= 35)
+    tmp.age[i] <- age.WOE[2]
+      
+  else if(train$age[i] <= 40)
+    tmp.age[i] <- age.WOE[3]
+      
+  else if(train$age[i] <= 45)
+    tmp.age[i] <- age.WOE[4]
+      
+  else if(train$age[i] <= 50)
+    tmp.age[i] <- age.WOE[5]
+      
+  else if(train$age[i] <= 55)
+    tmp.age[i] <- age.WOE[6]
+      
+  else if(train$age[i] <= 60)
+    tmp.age[i] <- age.WOE[7]
+      
+  else if(train$age[i] <= 65)
+    tmp.age[i] <- age.WOE[8]
+      
+  else if(train$age[i] <= 75)
+    tmp.age[i] <- age.WOE[9]
+      
+  else
+    tmp.age[i] <- age.WOE[10] 
+}
+```
+
+<br>
+
+##### - NumberOfTime30.59DaysPastDueNotWorse
+
+```{r}
+tmp.NumberOfTime30.59DaysPastDueNotWorse <- 0
+
+for(i in 1:nrow(train)) {
+  if(train$NumberOfTime30.59DaysPastDueNotWorse[i] <= 0)
+    tmp.NumberOfTime30.59DaysPastDueNotWorse[i] <- Num_30_59.WOE[1]
+    
+  else if(train$NumberOfTime30.59DaysPastDueNotWorse[i] <= 1)
+    tmp.NumberOfTime30.59DaysPastDueNotWorse[i] <- Num_30_59.WOE[2]
+      
+  else if(train$NumberOfTime30.59DaysPastDueNotWorse[i] <= 3)
+    tmp.NumberOfTime30.59DaysPastDueNotWorse[i] <- Num_30_59.WOE[3]
+      
+  else if(train$NumberOfTime30.59DaysPastDueNotWorse[i] <= 5)
+    tmp.NumberOfTime30.59DaysPastDueNotWorse[i] <- Num_30_59.WOE[4]
+      
+  else
+    tmp.NumberOfTime30.59DaysPastDueNotWorse[i] <- Num_30_59.WOE[5]
+}
+```
+
+<br>
+
+##### - DebtRatio
+
+```{r}
+tmp.DebtRatio <- 0
+
+for(i in 1:nrow(train)) {
+  if(train$DebtRatio[i] <= 0)
+    tmp.DebtRatio[i] <- DebtRatio.WOE[1]
+    
+  else if(train$DebtRatio[i] <= 0.5)
+    tmp.DebtRatio[i] <- DebtRatio.WOE[2]
+      
+  else if(train$DebtRatio[i] <= 1)
+    tmp.DebtRatio[i] <- DebtRatio.WOE[3]
+      
+  else
+    tmp.DebtRatio[i] <- DebtRatio.WOE[4]
+}
+```
+
+<br>
+
+##### - MonthlyIncome
+
+```{r}
+tmp.MonthlyIncome <- 0
+
+for(i in 1:nrow(train)) {
+  if(train$MonthlyIncome[i] <= 1000)
+    tmp.MonthlyIncome[i] <- MonthlyIncome.WOE[1]
+    
+  else if(train$MonthlyIncome[i] <= 2000)
+    tmp.MonthlyIncome[i] <- MonthlyIncome.WOE[2]
+      
+  else if(train$MonthlyIncome[i] <= 3000)
+    tmp.MonthlyIncome[i] <- MonthlyIncome.WOE[3]
+  
+  else if(train$MonthlyIncome[i] <= 4000)
+    tmp.MonthlyIncome[i] <- MonthlyIncome.WOE[4]
+
+  else if(train$MonthlyIncome[i] <= 5000)
+    tmp.MonthlyIncome[i] <- MonthlyIncome.WOE[5]
+
+  else if(train$MonthlyIncome[i] <= 6000)
+    tmp.MonthlyIncome[i] <- MonthlyIncome.WOE[6]
+    
+  else if(train$MonthlyIncome[i] <= 7500)
+    tmp.MonthlyIncome[i] <- MonthlyIncome.WOE[7]
+        
+  else if(train$MonthlyIncome[i] <= 9500)
+    tmp.MonthlyIncome[i] <- MonthlyIncome.WOE[8]
+      
+  else if(train$MonthlyIncome[i] <= 12000)
+    tmp.MonthlyIncome[i] <- MonthlyIncome.WOE[9]
+      
+  else
+    tmp.MonthlyIncome[i] <- MonthlyIncome.WOE[10]
+}
+```
+
+<br>
+
+##### - NumberOfTimes90DaysLate
+
+```{r}
+tmp.NumberOfTimes90DaysLate <- 0
+
+for(i in 1:nrow(train)) {
+  if(train$NumberOfTimes90DaysLate[i] <= 0)
+    tmp.NumberOfTimes90DaysLate[i] <- num_of_90.WOE[1]
+    
+  else if(train$NumberOfTimes90DaysLate[i] <= 1)
+    tmp.NumberOfTimes90DaysLate[i] <- num_of_90.WOE[2]
+      
+  else if(train$NumberOfTimes90DaysLate[i] <= 3)
+    tmp.NumberOfTimes90DaysLate[i] <- num_of_90.WOE[3]
+  
+  else if(train$NumberOfTimes90DaysLate[i] <= 5)
+    tmp.NumberOfTimes90DaysLate[i] <- num_of_90.WOE[4]
+      
+  else if(train$NumberOfTimes90DaysLate[i] <= 10)
+    tmp.NumberOfTimes90DaysLate[i] <- num_of_90.WOE[5]
+      
+  else
+    tmp.NumberOfTimes90DaysLate[i] <- num_of_90.WOE[6]
+}
+```
+
+<br>
+
+##### - NumberRealEstateLoansOrLines
+
+```{r}
+tmp.NumberRealEstateLoansOrLines <- 0
+
+for(i in 1:nrow(train)) {
+  if(train$NumberRealEstateLoansOrLines[i] <= 0)
+    tmp.NumberRealEstateLoansOrLines[i] <- num_RE.WOE[1]
+    
+  else if(train$NumberRealEstateLoansOrLines[i] <= 1)
+    tmp.NumberRealEstateLoansOrLines[i] <- num_RE.WOE[2]
+      
+  else if(train$NumberRealEstateLoansOrLines[i] <= 2)
+    tmp.NumberRealEstateLoansOrLines[i] <- num_RE.WOE[3]
+
+  else
+    tmp.NumberRealEstateLoansOrLines[i] <- num_RE.WOE[4]
+}
+```
+
+<br>
+
+##### - NumberOfTime60.89DaysPastDueNotWorse
+
+```{r}
+tmp.NumberOfTime60.89DaysPastDueNotWorse <- 0
+
+for(i in 1:nrow(train)) {
+  if(train$NumberOfTime60.89DaysPastDueNotWorse[i] <= 0)
+    tmp.NumberOfTime60.89DaysPastDueNotWorse[i] <- num_60_89.WOE[1]
+    
+  else if(train$NumberOfTime60.89DaysPastDueNotWorse[i] <= 1)
+    tmp.NumberOfTime60.89DaysPastDueNotWorse[i] <- num_60_89.WOE[2]
+
+  else
+    tmp.NumberOfTime60.89DaysPastDueNotWorse[i] <- num_60_89.WOE[3]
+}
+```
+
+<br>
+
+##### - NumberOfDependents
+
+```{r}
+tmp.NumberOfDependents <- 0
+
+for(i in 1:nrow(train)) {
+  if(train$NumberOfDependents[i] <= 0)
+    tmp.NumberOfDependents[i] <- num_dep.WOE[1]
+    
+  else if(train$NumberOfDependents[i] <= 1)
+    tmp.NumberOfDependents[i] <- num_dep.WOE[2]
+      
+  else if(train$NumberOfDependents[i] <= 2)
+    tmp.NumberOfDependents[i] <- num_dep.WOE[3]
+  
+  else if(train$NumberOfDependents[i] <= 3)
+    tmp.NumberOfDependents[i] <- num_dep.WOE[4]
+      
+  else if(train$NumberOfDependents[i] <= 5)
+    tmp.NumberOfDependents[i] <- num_dep.WOE[5]
+      
+  else
+    tmp.NumberOfDependents[i] <- num_dep.WOE[6]
+}
+```
+
+
+<br>
+
+### 6.4 combine to DataFrame
+
+```{r}
+train_WOE = cbind.data.frame(tmp.age,
+                             tmp.NumberOfTime30.59DaysPastDueNotWorse,
+                             tmp.DebtRatio,
+                             tmp.MonthlyIncome,
+                             tmp.NumberOfTimes90DaysLate,
+                             tmp.NumberRealEstateLoansOrLines,
+                             tmp.NumberOfTime60.89DaysPastDueNotWorse,
+                             tmp.NumberOfDependents)
+head(train_WOE)
+```
+
+<br>
+
+## 7. Scorecard creation and implementation
+
+The format used by standard credit scoring cards follows a set of IF-THEN rules for each variable in the scorecard, where the value of each variable determines the score assigned to that variable, and the total score is the sum of the scores assigned to each variable
+
+### 7.1 Apply Logistics Regression to WOE
+
+```{r}
+train_WOE$SeriousDlqin2yrs = 1-train$SeriousDlqin2yrs
+
+glm.fit = glm(SeriousDlqin2yrs~.,data = train_WOE,family = binomial(link = logit))
+coe <- (glm.fit$coefficients)
+summary(glm.fit)
+```
+
+<br>
+
+### 7.2 Setting Score
+
+The score is set up as follows: assuming a bad-to-good ratio of 15 corresponds to 600 points, and for every additional 20 points, the bad-to-good ratio is halved to calculate P and Q. If the results are not clear in the later stage, the bad-to-good ratio can be halved for every additional 30-50 points.
+
+Additionally, the score can be calculated using the formula: 
+
+$$Score = Q + P * \log(odds)$$
+
+```{r}
+p <- -20/log(2)
+q <- 600+20*log(15)/log(2)
+head(train_WOE)
+```
+
+<br>
+
+```{r}
+Score <- q + p*{as.numeric(coe[1])+
+               as.numeric(coe[2])*tmp.age +
+               as.numeric(coe[3])*tmp.NumberOfTime30.59DaysPastDueNotWorse+
+               p*as.numeric(coe[4])*tmp.DebtRatio+
+               p*as.numeric(coe[5])*tmp.MonthlyIncome+
+               p*as.numeric(coe[6])*tmp.NumberOfTimes90DaysLate+
+               p*as.numeric(coe[7])*tmp.NumberRealEstateLoansOrLines+
+               p*as.numeric(coe[8])*tmp.NumberOfTime60.89DaysPastDueNotWorse+
+               p*as.numeric(coe[9])*tmp.NumberOfDependents}
+```
+
+<br>
+
+##### The total score of an individual = base score + scores obtained from each component
+
+#### basic score
+
+```{r}
+base <- q + p*as.numeric(coe[1])
+base
+```
+
+<br>
+
+#### scores obtained from each component
+
+##### - age
+
+```{r}
+age.score <- p * as.numeric(coe[2]) * age.WOE
+```
+
+<br>
+
+##### - NumberOfTime30.59DaysPastDueNotWorse
+
+```{r}
+Num_30_59.score <- p * as.numeric(coe[3]) * Num_30_59.WOE
+```
+
+<br>
+
+##### - DebtRatio
+
+```{r}
+DebtRatio.score <- p * as.numeric(coe[4]) * DebtRatio.WOE
+```
+
+<br>
+
+##### - MonthlyIncome
+
+```{r}
+MonthlyIncome.score <- p * as.numeric(coe[5]) * MonthlyIncome.WOE
+```
+
+<br>
+
+##### - NumberOfTimes90DaysLate
+
+```{r}
+Dnum_of_90.score <- p * as.numeric(coe[6]) * num_of_90.WOE
+```
+
+<br>
+
+##### - NumberRealEstateLoansOrLines
+
+```{r}
+num_RE.score <- p * as.numeric(coe[7]) * num_RE.WOE
+```
+
+<br>
+
+##### - NumberOfTime60.89DaysPastDueNotWorse
+
+```{r}
+num_60_89.score <- p * as.numeric(coe[8]) * num_60_89.WOE
+```
+
+<br>
+
+##### - NumberOfDependents
+
+```{r}
+num_dep.score <- p * as.numeric(coe[9]) * num_dep.WOE
+```
+
+
+<br>
+
+### 7.3 Compute the scores for each bin of each variable
+
+```{r}
+getscore <- function(i,x){
+    score = round(p*as.numeric(coe[i])*x,0)
+    return(score)
+}
+```
+
+<br>
+
+##### - age
+
+```{r}
+age.SCORE <- lapply(age.score, getscore, i = 2)
+age.SCORE
+```
+
+<br>
+
+##### - NumberOfTime30.59DaysPastDueNotWorse
+
+```{r}
+Num_30_59.SCORE <- lapply(Num_30_59.score, getscore, i = 3)
+Num_30_59.SCORE
+```
+
+<br>
+
+##### - DebtRatio
+
+```{r}
+DebtRatio.SCORE <- lapply(DebtRatio.score, getscore, i = 4)
+DebtRatio.SCORE
+```
+
+<br>
+
+##### - MonthlyIncome
+
+```{r}
+MonthlyIncome.SCORE <- lapply(MonthlyIncome.score, getscore, i = 5)
+MonthlyIncome.SCORE
+```
+
+<br>
+
+##### - NumberOfTimes90DaysLate
+
+```{r}
+Dnum_of_90.SCORE <- lapply(Dnum_of_90.score, getscore, i = 6)
+Dnum_of_90.SCORE
+```
+
+<br>
+
+##### - NumberRealEstateLoansOrLines
+
+```{r}
+num_RE.SCORE <- lapply(num_RE.score, getscore, i = 7)
+num_RE.SCORE
+```
+
+<br>
+
+##### - NumberOfTime60.89DaysPastDueNotWorse
+
+```{r}
+num_60_89.SCORE <- lapply(num_60_89.score, getscore, i = 8)
+num_60_89.SCORE
+```
+
+<br>
+
+##### - NumberOfDependents
+
+```{r}
+num_dep.SCORE <- lapply(num_dep.score, getscore, i = 9)
+num_dep.SCORE
+```
+
+<br>
+
+## 8. Score-Table
+
+![](./image_1.png)
+
+<br>
+
+#### Examples
+
+![](./image_2.png)
+
+<br>
+
+![](./image_3.png)
+
